@@ -1,27 +1,28 @@
-python -m venv .venv
+#   !/bin/bash
+# Install required Python packages for the project
+# This for python 3.10.0 
 
-.\.venv\Scripts\activate
+pip install tensorflow==2.12.0  note-seq pretty_midi faiss-cpu jupyter
 
-pip install numpy==1.26.4
+pip install tensorflow-probability==0.19.0
+
+pip install --no-deps magenta
+
+pip install tf-slim
+
+pip install tensorflow_datasets
+
+pip uninstall protobuf 
+    
+pip install protobuf==3.20.3
+# This specific version is required to avoid compatibility issues with magenta 
+    
+    
+    
+    
 
 
 
 
-# Upgrade pip to ensure compatibility
-pip install --upgrade pip
+    
 
-# Install TensorFlow, the core ML framework
-pip install tensorflow
-
-# Install Magenta, which contains MusicVAE and other music utilities. [1, 19]
-pip install magenta
-
-# Install pretty_midi for parsing and handling MIDI files easily. [10, 18]
-pip install pretty_midi
-
-# Install a vector search library. faiss-cpu is a great starting point.
-# It's CPU-only and easier to install than the GPU version. [4, 15]
-pip install faiss-cpu
-
-# Jupyter for running notebook-style experiments in VS Code
-pip install jupyter
