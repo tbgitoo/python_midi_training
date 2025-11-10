@@ -1,0 +1,6 @@
+# Exclude virtual environment folders
+.venv/
+venv/
+
+models/
+data_sets/
