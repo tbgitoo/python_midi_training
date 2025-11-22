@@ -5,4 +5,5 @@ MusicVAE is an open source project by Google (https://magenta.tensorflow.org/), 
 https://huggingface.co/google/magenta-realtime
 
 
-The code is under an Apache 2.0 
+The code is under an Apache 2.0 license.
+
