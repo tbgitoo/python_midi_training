@@ -16,6 +16,13 @@ pip uninstall protobuf
     
 pip install protobuf==3.20.3
 # This specific version is required to avoid compatibility issues with magenta 
+
+
+# For working with R scripts
+
+pip install pyreadr
+
+pip install radian
     
     
     
