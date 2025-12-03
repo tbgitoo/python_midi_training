@@ -1,14 +1,7 @@
 import tensorflow as tf
-from tensorflow.keras.layers import LSTMCell, RNN, Dense
+from tensorflow.keras.layers import LSTMCell, RNN, Dense, StackedRNNCells
 import os
 import requests
-
-LATENT_DIM = 512
-OUTPUT_DEPTH = 90
-SEQUENCE_LENGTH = 32 # The correct, fixed sequence length for this model
-BATCH_SIZE = 1
-LSTM_UNITS=2048
-NUM_LAYERS=3
 
 # Helper class for the specific step logic in autoregressive generation
 class AutoregressiveStep(tf.keras.layers.Layer):
@@ -20,14 +13,11 @@ class AutoregressiveStep(tf.keras.layers.Layer):
         self.state_size = [cell.state_size for cell in self.lstm_cells]
 
     def call(self, inputs, states):
-        # `inputs` is a tuple: (the input for this step, the constant z vector)
-        step_input, z = inputs
-        
-        # Concatenate the current step's input with z
-        step_input_with_z = tf.concat([step_input, z], axis=-1)
+        # `inputs` is now a single concatenated tensor for this timestep.
+        # The concatenation of (step_input, z) happens *before* the RNN layer.
 
         # Manually run the stack of LSTM cells for a single step
-        cell_input = step_input_with_z
+        cell_input = inputs
         new_states = []
         for i, cell in enumerate(self.lstm_cells):
             cell_output, (new_h, new_c) = cell(cell_input, states=states[i])
@@ -62,14 +52,38 @@ class AutoregressiveStep(tf.keras.layers.Layer):
 # The MusicVAEDecoder class remains the same
 class MusicVAEDecoder(tf.keras.Model):
     """The decoder portion of the MusicVAE model."""
-    def __init__(self, output_depth, lstm_units=2048, num_layers=3, name="decoder",sequence_length=32):
-        super(MusicVAEDecoder, self).__init__(name=name)
-        self.z_to_initial_state = Dense(lstm_units * num_layers * 2, name="z_to_initial_state")
-        self.lstm_cells = [LSTMCell(lstm_units, name=f"lstm_cell_{i}") for i in range(num_layers)]
-        self.rnn = RNN(self.lstm_cells, return_sequences=True, return_state=True, name="decoder_rnn")
-        self.output_projection = Dense(output_depth, name="output_projection")
-        self.vocab_size = output_depth
-        self.sequence_length = sequence_length
+    @staticmethod
+    def get_default_config():
+        """Returns the default configuration dictionary for the 'cat-mel_2bar_big' model."""
+        return {
+            "output_depth": 90,
+            "latent_dim": 512,
+            "lstm_units": 2048,
+            "num_layers": 3,
+            "sequence_length": 32,
+        }
+
+    def __init__(self, config=None, **kwargs):
+        super(MusicVAEDecoder, self).__init__(**kwargs)
+
+        # If no config is provided, use the default.
+        if config is None:
+            config = self.get_default_config()
+
+        # --- Store all architectural parameters as instance attributes ---
+        self.output_depth = config["output_depth"]
+        self.latent_dim = config["latent_dim"]
+        self.lstm_units = config["lstm_units"]
+        self.num_layers = config["num_layers"]
+        self.sequence_length = config["sequence_length"]
+        self.vocab_size = self.output_depth # Alias for clarity
+
+        self.z_to_initial_state = Dense(self.lstm_units * self.num_layers * 2, name="z_to_initial_state")
+        self.z_to_initial_state.build(input_shape=(None, self.latent_dim)) # Explicitly build with known latent_dim
+        self.lstm_cells = [LSTMCell(self.lstm_units, name=f"lstm_cell_{i}") for i in range(self.num_layers)]
+        stacked_cells = StackedRNNCells(self.lstm_cells)
+        self.rnn = RNN(stacked_cells, return_sequences=True, return_state=True, name="decoder_rnn")
+        self.output_projection = Dense(self.output_depth, name="output_projection")
 
 
         # --- THE FIX: Create the autoregressive step layer ---
@@ -83,27 +97,24 @@ class MusicVAEDecoder(tf.keras.Model):
     # --- 2. The "Teaching" Endpoint: Decorated for Training/Reconstruction ---
     # This will be one of the functions available in your saved model.
     @tf.function(input_signature=[
-        tf.TensorSpec(shape=[None, LATENT_DIM], name="z"),
-        tf.TensorSpec(shape=[BATCH_SIZE, None, OUTPUT_DEPTH], name="inputs")
+        tf.TensorSpec(shape=[None, None], name="z"),
+        tf.TensorSpec(shape=[None, None, None], name="inputs")
     ])
     def reconstruct(self, z, inputs):
         """
         Performs the forward pass of the decoder.
         """
         # 1. Get initial state from z
-        initial_state=self.get_initial_state(z)
+        initial_state=self._get_initial_state(z)
 
     
-        # 2. Prepare the latent vector for concatenation at each time step.
-        # We need to repeat `z` so it can be attached to every element of the sequence.
-        # Tile z from shape [batch, latent_dim] to [batch, sequence_length, latent_dim]
-        z_repeated = tf.tile(tf.expand_dims(z, 1), [1, self.sequence_length, 1])
+        # 2. Prepare the latent vector, making sure it matches the input's dynamic sequence length.
+        # THE FIX: Get the sequence length dynamically from the `inputs` tensor.
+        current_sequence_length = tf.shape(inputs)[1]
+        z_repeated = tf.tile(tf.expand_dims(z, 1), [1, current_sequence_length, 1])
         
         
-        # Concatenate z with the inputs along the feature dimension.
-        # `inputs` has shape [batch, sequence_length, 90]
-            # `z_repeated` has shape [batch, sequence_length, 512]
-            # The result will have shape [batch, sequence_length, 602]
+        # 3. Concatenate z with the inputs along the feature dimension.
         rnn_inputs = tf.concat([inputs, z_repeated], axis=-1)
 
          # Run the RNN.
@@ -114,24 +125,23 @@ class MusicVAEDecoder(tf.keras.Model):
         return output
 
     @tf.function(input_signature=[
-        tf.TensorSpec(shape=[None, LATENT_DIM], name="z")
+        tf.TensorSpec(shape=[None, None], name="z")
     ])
     def generate(self, z):
         batch_size = tf.shape(z)[0]
         
         # 1. Get initial state from z
-        initial_state = self.get_initial_state(z) # Same initial state processing as for reconstruction
+        initial_state = self._get_initial_state(z) # Same initial state processing as for reconstruction
         
         # 2. Create the inputs for the RNN layer.
         # The RNN layer needs a sequence to iterate over. We give it a dummy sequence.
         # The actual input for each step will be constructed *inside* the AutoregressiveStep layer.
         dummy_sequence = tf.zeros([batch_size, self.sequence_length, self.vocab_size])
         
-        # We also need to pass `z` as a constant to each step.
+        # We also need to pass `z` as a constant to each step. We concatenate it
+        # with the dummy sequence to create a single input tensor for the RNN.
         z_repeated = tf.tile(tf.expand_dims(z, 1), [1, self.sequence_length, 1])
-        
-        # The RNN layer will unpack this tuple at each time step
-        rnn_inputs = (dummy_sequence, z_repeated)
+        rnn_inputs = tf.concat([dummy_sequence, z_repeated], axis=-1)
         
         # 3. Call the generation RNN
         # This is now a single, clean, graph-native call.
@@ -139,7 +149,7 @@ class MusicVAEDecoder(tf.keras.Model):
         
         return logits_sequence
     
-    def get_initial_state(self, z):
+    def _get_initial_state(self, z):
 
         batch_size = tf.shape(z)[0]
         num_layers = len(self.lstm_cells)
@@ -172,40 +182,32 @@ class MusicVAEDecoder(tf.keras.Model):
         return(initial_state)
     
 
-    # --- THE FIX 1: Make `generate` logic the primary `call` method ---
-    # This method is UNDECORATED.
-    def call(self, z):
+    def call(self, inputs, training=False):
         """
-        This is the primary forward pass, implementing autoregressive generation.
+        The primary forward pass for training (teacher-forcing).
+        This ensures the `self.rnn` layer is part of the main model graph.
+        `inputs` is expected to be a tuple: (z, teacher_sequence).
         """
-        batch_size = tf.shape(z)[0]
-        initial_state = self.get_initial_state(z)
-        
-        # The RNN layer needs a dummy sequence to know how many steps to run.
-        dummy_sequence = tf.zeros([batch_size, self.sequence_length, self.vocab_size])
-        
-        # We also need to pass `z` as a constant to each step.
-        z_repeated = tf.tile(tf.expand_dims(z, 1), [1, self.sequence_length, 1])
-        
-        rnn_inputs = (dummy_sequence, z_repeated)
-        
-        logits_sequence = self.generation_rnn(rnn_inputs, initial_state=initial_state)
-        
-        return logits_sequence
+        z, teacher_sequence = inputs
+        # Delegate to the `reconstruct` logic.
+        return self.reconstruct(z, teacher_sequence)
     
     def get_config(self):
         # This allows Keras to save the model's high-level configuration.
-        return {
+        config = super().get_config()
+        config.update({
+            "output_depth": self.output_depth,
             "latent_dim": self.latent_dim,
             "lstm_units": self.lstm_units,
-            "vocab_size": self.vocab_size,
+            "num_layers": self.num_layers,
             "sequence_length": self.sequence_length,
-        }
+        })
+        return config
 
     @classmethod
     def from_config(cls, config):
         # This tells Keras how to create the model from the config.
-        return cls(**config)
+        return cls(config=config)
 
 
 
@@ -234,11 +236,11 @@ def load_magenta_weights(decoder_model, checkpoint_path):
         # THE FIX: Use the correct input dimension for splitting the kernel,
         # based on the layer index.
         if i == 0:
-            # The original model's first layer has a complex input of dim 602.
-            input_dim = 602
+            # Input is teacher sequence (output_depth) + latent vector (latent_dim)
+            input_dim = decoder_model.output_depth + decoder_model.latent_dim
         else:
             # Subsequent layers take the output of the previous LSTM layer.
-            input_dim = cell.units # which is 2048
+            input_dim = cell.units
 
         # Perform the split at the correct index.
         keras_kernel = tf1_kernel[:input_dim, :]
@@ -255,15 +257,3 @@ def load_magenta_weights(decoder_model, checkpoint_path):
     print("Loaded weights for 'output_projection' layer.")
 
     print("\nSuccessfully loaded all decoder weights from Magenta checkpoint!")
-
-
-
-
-
-
-
-
-
-
-
-
