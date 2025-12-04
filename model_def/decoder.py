@@ -233,6 +233,30 @@ def load_magenta_weights(decoder_model, checkpoint_path):
         tf1_kernel = reader.get_tensor(tf1_kernel_name)
         tf1_bias = reader.get_tensor(tf1_bias_name)
 
+        # --- WEIGHT RE-ORDERING AND BIAS ADJUSTMENT LOGIC ---
+        def reorder_lstm_weights(kernel, bias, num_units):
+            # TF1 format: [i, c, f, o] (input, cell, forget, output)
+            # TF2 format: [i, f, c, o] (input, forget, cell, output)
+    
+            # Split into the 4 gate weights
+            # The last dimension is 4 * num_units, so we split into 4 equal parts
+            k_i, k_c, k_f, k_o = tf.split(kernel, 4, axis=-1)
+            b_i, b_c, b_f, b_o = tf.split(bias, 4, axis=-1)
+
+            # The legacy LSTMCell adds a `forget_bias` of 1.0 by default.
+            # We must manually add it to the forget gate's bias.
+            b_f = b_f + 1.0
+    
+            # Re-assemble in TF2 order (swap c and f)
+            reordered_kernel = tf.concat([k_i, k_f, k_c, k_o], axis=-1)
+            reordered_bias = tf.concat([b_i, b_f, b_c, b_o], axis=-1)
+    
+            return reordered_kernel, reordered_bias
+
+        # Apply reordering and bias adjustment
+        tf1_kernel, tf1_bias = reorder_lstm_weights(tf1_kernel, tf1_bias, cell.units)
+
+
         # THE FIX: Use the correct input dimension for splitting the kernel,
         # based on the layer index.
         if i == 0:
@@ -246,7 +270,7 @@ def load_magenta_weights(decoder_model, checkpoint_path):
         keras_kernel = tf1_kernel[:input_dim, :]
         keras_recurrent_kernel = tf1_kernel[input_dim:, :]
         
-        # Now the shapes will match perfectly.
+        # Now the shapes and internal gate order will match perfectly.
         cell.set_weights([keras_kernel, keras_recurrent_kernel, tf1_bias])
         print(f"Loaded weights for LSTM cell {i} from '{tf1_kernel_name}'.")
 
