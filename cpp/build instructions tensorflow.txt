@@ -1,0 +1,56 @@
+$env:PROJECT_ROOT = ("$HOME\Documents\git\python_midi_training" -replace '^C:', 'D:')
+
+mkdir "$env:PROJECT_ROOT\tflite_sources" -Force
+
+
+#download and compile the abseil library
+# =========================================================
+cd "$env:PROJECT_ROOT\tflite_sources"
+
+git clone https://github.com/abseil/abseil-cpp.git
+cd abseil-cpp
+
+cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps" -DCMAKE_CXX_STANDARD=17
+
+cmake --install build --config Release --prefix "$env:PROJECT_ROOT\tflite_deps"
+
+#download and compile the Eigen library
+# =========================================================
+cd "$env:PROJECT_ROOT\tflite_sources"
+
+git clone https://gitlab.com/libeigen/eigen.git
+cd eigen
+
+# Eigen is mostly header-only, but we run the install process
+# to get the CMake config files correctly placed in our deps folder.
+cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps"
+
+cmake --install build --config Release --prefix "$env:PROJECT_ROOT\tflite_deps"
+
+
+
+
+
+
+cd "$env:PROJECT_ROOT\tflite_sources"
+
+
+
+mkdir tflite_build
+
+
+
+cd .\tflite_build\
+
+cmake ../tensorflow/tensorflow/lite -DCMAKE_BUILD_TYPE=Debug \ 
+  -DTFLITE_ENABLE_INSTALL=ON \
+  -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON \
+  -DSYSTEM_FARMHASH=ON \
+  -DSYSTEM_PTHREADPOOL=ON \
+  -Dabsl_DIR=<install path>/lib/cmake/absl \
+  -DEigen3_DIR=<install path>/share/eigen3/cmake \
+  -DFlatBuffers_DIR=<install path>/lib/cmake/flatbuffers \
+  -Dgemmlowp_DIR=<install path>/lib/cmake/gemmlowp \
+  -DNEON_2_SSE_DIR=<install path>/lib/cmake/NEON_2_SSE \
+  -Dcpuinfo_DIR=<install path>/share/cpuinfo \
+  -Druy_DIR=<install path>/lib/cmake/ruy
