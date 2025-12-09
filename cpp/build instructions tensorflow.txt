@@ -10,7 +10,7 @@ cd "$env:PROJECT_ROOT\tflite_sources"
 git clone https://github.com/abseil/abseil-cpp.git
 cd abseil-cpp
 
-cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps" -DCMAKE_CXX_STANDARD=17
+cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps" -DCMAKE_CXX_STANDARD=17 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
 
 cmake --install build --config Release --prefix "$env:PROJECT_ROOT\tflite_deps"
 
@@ -23,7 +23,69 @@ cd eigen
 
 # Eigen is mostly header-only, but we run the install process
 # to get the CMake config files correctly placed in our deps folder.
-cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps"
+cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps" -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+
+cmake --install build --config Release --prefix "$env:PROJECT_ROOT\tflite_deps"
+
+#download and compile the FlatBuffers library
+# =========================================================
+cd "$env:PROJECT_ROOT\tflite_sources"
+
+git clone https://github.com/google/flatbuffers.git
+cd flatbuffers
+
+# We disable tests to speed up the build.
+cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps" -DFLATBUFFERS_BUILD_TESTS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+
+cmake --build build --config Release
+
+cmake --install build --config Release --prefix "$env:PROJECT_ROOT\tflite_deps"
+
+#download and compile the gemmlowp library
+# =========================================================
+cd "$env:PROJECT_ROOT\tflite_sources"
+
+git clone https://github.com/google/gemmlowp.git
+cd gemmlowp
+
+# gemmlowp is a header-only library, so there is nothing to compile.
+# However, we manually copy the headers to our central dependency folder
+# so the main TFLite build can find them in one consistent location.
+Copy-Item -Path . -Destination "$env:PROJECT_ROOT\tflite_deps\include\gemmlowp" -Recurse -Force
+
+#download and compile the cpuinfo library
+# =========================================================
+cd "$env:PROJECT_ROOT\tflite_sources"
+
+git clone https://github.com/pytorch/cpuinfo.git
+cd cpuinfo
+
+# We disable tests and tools to speed up the build.
+cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps" -DCPUINFO_BUILD_TOOLS=OFF -DCPUINFO_BUILD_UNIT_TESTS=OFF -DCPUINFO_BUILD_MOCK_TESTS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+
+cmake --build build --config Release
+
+cmake --install build --config Release --prefix "$env:PROJECT_ROOT\tflite_deps"
+
+#download and compile the ruy library
+# =========================================================
+cd "$env:PROJECT_ROOT\tflite_sources"
+
+git clone https://github.com/google/ruy.git
+cd ruy
+ git submodule update --init
+
+# Clean up any existing build directories to prevent conflicts or permission issues.
+Remove-Item -Path "build" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path "BUILD" -Recurse -Force -ErrorAction SilentlyContinue
+
+# Configure, build, and install the library.
+cmake -B build -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -DBUILD_GMOCK=OFF "-Dgtest_force_shared_crt=ON" -DCMAKE_CXX_FLAGS="/wd4068"
+
+
+cmake --build build --config Release
+
+
 
 cmake --install build --config Release --prefix "$env:PROJECT_ROOT\tflite_deps"
 
@@ -32,25 +94,42 @@ cmake --install build --config Release --prefix "$env:PROJECT_ROOT\tflite_deps"
 
 
 
-cd "$env:PROJECT_ROOT\tflite_sources"
+
+# =========================================================
+# Build TensorFlow Lite
+# =========================================================
+cd "$env:PROJECT_ROOT"
+
+Remove-Item -Path "tflite_build" -Recurse -Force -ErrorAction SilentlyContinue
 
 
+mkdir "tflite_build" -Force
+cd "tflite_build"
 
-mkdir tflite_build
+# Create a "super-build" CMakeLists.txt file. This file will act as the
+# main entry point and correctly configure the TensorFlow Lite build
+# within the context of the larger TensorFlow project, preventing downloads.
+Set-Content -Path "CMakeLists.txt" -Value @"
+cmake_minimum_required(VERSION 3.16)
+project(TFLiteSuperBuild)
+add_subdirectory($($env:PROJECT_ROOT)/tensorflow tensorflow_build)
+"@
 
+# Configure the TFLite build. This command points to all the dependencies
+# we have manually compiled in the tflite_deps folder.
+cmake . `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_INSTALL_PREFIX="$env:PROJECT_ROOT\tflite_deps" `
+  -DTFLITE_ENABLE_INSTALL=ON `
+  -Dabsl_DIR="$env:PROJECT_ROOT\tflite_deps\lib\cmake\absl" `
+  -DEigen3_DIR="$env:PROJECT_ROOT\tflite_deps\share\eigen3\cmake" `
+  -DFlatBuffers_DIR="$env:PROJECT_ROOT\tflite_deps\lib\cmake\flatbuffers"`
+  -Dcpuinfo_DIR="$env:PROJECT_ROOT\tflite_deps\share\cpuinfo" `
+  -Druy_DIR="$env:PROJECT_ROOT\tflite_deps\lib\cmake\ruy" `
+  -DCMAKE_INCLUDE_PATH="$env:PROJECT_ROOT\tflite_deps\include" `
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+  -DCMAKE_CXX_FLAGS="/wd4068"
 
+cmake --build . --config Release
 
-cd .\tflite_build\
-
-cmake ../tensorflow/tensorflow/lite -DCMAKE_BUILD_TYPE=Debug \ 
-  -DTFLITE_ENABLE_INSTALL=ON \
-  -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON \
-  -DSYSTEM_FARMHASH=ON \
-  -DSYSTEM_PTHREADPOOL=ON \
-  -Dabsl_DIR=<install path>/lib/cmake/absl \
-  -DEigen3_DIR=<install path>/share/eigen3/cmake \
-  -DFlatBuffers_DIR=<install path>/lib/cmake/flatbuffers \
-  -Dgemmlowp_DIR=<install path>/lib/cmake/gemmlowp \
-  -DNEON_2_SSE_DIR=<install path>/lib/cmake/NEON_2_SSE \
-  -Dcpuinfo_DIR=<install path>/share/cpuinfo \
-  -Druy_DIR=<install path>/lib/cmake/ruy
+cmake --install . --config Release
